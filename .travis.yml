@@ -17,14 +17,6 @@ matrix:
 
 script:
     - set -e
-    - mkdir -p "libcorrect"
-    - git clone https://github.com/quiet/libcorrect.git
-    - cd libcorrect
-    - mkdir build
-    - cd build
-    - cmake -DCMAKE_BUILD_TYPE=Release .. && make && make shim
-    - sudo make install
-    - cd ../..
     - ./bootstrap.sh
     - ./configure
     - make
