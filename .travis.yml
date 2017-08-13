@@ -18,6 +18,6 @@ matrix:
 script:
     - set -e
     - ./bootstrap.sh
-    - ./configure
+    - ./configure --enable-simdoverride
     - make
     - make check
