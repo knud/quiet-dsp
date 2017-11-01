@@ -23,7 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
+#include <math.h>
 #include <assert.h>
 #include <sys/resource.h>
 #include "liquid.h"

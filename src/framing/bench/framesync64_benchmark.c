@@ -23,7 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/resource.h>
-
+#include <math.h>
 #include "liquid.h"
 
 typedef struct {
