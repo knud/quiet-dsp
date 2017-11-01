@@ -338,6 +338,39 @@ void NCO(_mix_block_down)(NCO() _q,
 #endif
 }
 
+// Rotate input vector array down by angle array:
+//      y(t) = x(t) exp{-j (f*t + theta)}
+// TODO : implement NCO/VCO-specific versions
+//  _q      :   nco object
+//  _x      :   input array [size: _n x 1]
+//  _y      :   output sample [size: _n x 1]
+//  _n      :   number of input, output samples
+void NCO(_mix_block_down_fast)(NCO() _q,
+                               T * _phis,
+                               TC *_x,
+                               TC *_y,
+                               unsigned int _n)
+{
+
+  // compute sine, cosine internally
+    for (unsigned int i=0; i<_n; i++) {
+      // assume phase is constrained to be in (-pi,pi)
+
+      // compute index
+      // NOTE : 40.743665 ~ 256 / (2*pi)
+      // NOTE : add 512 to ensure positive value, add 0.5 for rounding precision
+      // TODO : move away from floating-point specific code
+      _q->index = ((unsigned int)((_phis[i])*40.743665f + 512.0f + 0.5f))&0xff;
+      assert(_q->index < 256);
+
+      _q->sine = _q->sintab[_q->index];
+      _q->cosine = _q->sintab[(_q->index+64)&0xff];
+
+      // multiply _x by [cos(-theta) + _Complex_I*sin(-theta)]
+      _y[i] = _x[i] * (_q->cosine - _Complex_I*(_q->sine));
+    }
+}
+
 //
 // internal methods
 //

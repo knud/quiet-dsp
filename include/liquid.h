@@ -3838,6 +3838,21 @@ void flexframesync_execute(flexframesync          _q,
                            liquid_float_complex * _x,
                            unsigned int           _n);
 
+// execute frame buffered synchronizer
+// All the packet samples are assumed contained in _x
+//  _q  :   frame synchronizer object
+//  _x  :   input sample array [size: _n x 1]
+//  _n  :   number of input samples
+//  _pe :   earliest expected sample of packet start
+//  _pl :   latest expected sample of packet start
+void
+flexframesync_buffered_execute (
+  flexframesync _q,
+  liquid_float_complex * _x,
+  unsigned int _n,
+  unsigned int _pe,
+  unsigned int _pl);
+
 // frame data statistics
 void             flexframesync_reset_framedatastats(flexframesync _q);
 framedatastats_s flexframesync_get_framedatastats  (flexframesync _q);
@@ -4270,6 +4285,21 @@ void qdetector_cccf_reset  (qdetector_cccf _q);
 void * qdetector_cccf_execute(qdetector_cccf       _q,
                               liquid_float_complex _x);
 
+// execute detector over entire frame buffer, looking for pn sequence
+// if found, return offset into _x where it starts
+// otherwise return < 0
+//
+//  _q  :   detector object
+//  _x  :   input sample array [size: _n x 1]
+//  _n  :   number of input samples
+//  _pe :   earliest expected sample of packet start
+//  _pl :   latest expected sample of packet start
+int qdetector_cccf_buffered_execute(qdetector_cccf         _q,
+                                    liquid_float_complex * _x,
+                                    unsigned int           _n,
+                                    unsigned int           _pe,
+                                    unsigned int           _pl);
+
 // set detection threshold (should be between 0 and 1, good starting point is 0.5)
 void qdetector_cccf_set_threshold(qdetector_cccf _q,
                                   float          _threshold);
@@ -4279,13 +4309,15 @@ void qdetector_cccf_set_range(qdetector_cccf _q,
                               float          _dphi_max);
 
 // access methods
-unsigned int qdetector_cccf_get_seq_len (qdetector_cccf _q); // sequence length
-const void * qdetector_cccf_get_sequence(qdetector_cccf _q); // pointer to sequence
-unsigned int qdetector_cccf_get_buf_len (qdetector_cccf _q); // buffer length
-float        qdetector_cccf_get_tau     (qdetector_cccf _q); // fractional timing offset estimate
-float        qdetector_cccf_get_gamma   (qdetector_cccf _q); // channel gain
-float        qdetector_cccf_get_dphi    (qdetector_cccf _q); // carrier frequency offset estimate
-float        qdetector_cccf_get_phi     (qdetector_cccf _q); // carrier phase offset estimate
+unsigned int qdetector_cccf_get_seq_len        (qdetector_cccf _q); // sequence length
+const void * qdetector_cccf_get_sequence       (qdetector_cccf _q); // pointer to sequence
+const float  qdetector_cccf_get_sequence_sumsq (qdetector_cccf _q); // pointer to sequence
+const void * qdetector_cccf_get_conj_sequence  (qdetector_cccf _q); // pointer to conjugate of sequence
+unsigned int qdetector_cccf_get_buf_len        (qdetector_cccf _q); // buffer length
+float        qdetector_cccf_get_tau            (qdetector_cccf _q); // fractional timing offset estimate
+float        qdetector_cccf_get_gamma          (qdetector_cccf _q); // channel gain
+float        qdetector_cccf_get_dphi           (qdetector_cccf _q); // carrier frequency offset estimate
+float        qdetector_cccf_get_phi            (qdetector_cccf _q); // carrier phase offset estimate
 
 //
 // Pre-demodulation detector
@@ -6225,6 +6257,18 @@ void NCO(_mix_block_down)(NCO() _q,                             \
                           TC *_x,                               \
                           TC *_y,                               \
                           unsigned int _N);                     \
+                                                                \
+/* Rotate input vector down by NCO angle (stepping)     */      \
+/*  _q      :   nco object                              */      \
+/*  _phis   :   stepped angles vector [size: _N x 1]    */      \
+/*  _x      :   input vector [size: _N x 1]             */      \
+/*  _y      :   output vector [size: _N x 1]            */      \
+/*  _N      :   vector size                             */      \
+void NCO(_mix_block_down_fast)(NCO() _q,                        \
+                               T * _phis,                       \
+                               TC *_x,                          \
+                               TC *_y,                          \
+                               unsigned int _N);                \
 
 // Define nco APIs
 LIQUID_NCO_DEFINE_API(NCO_MANGLE_FLOAT, float, liquid_float_complex)

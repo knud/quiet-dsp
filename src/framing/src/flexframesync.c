@@ -29,18 +29,21 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-
+#include <time.h>
 
 #include <assert.h>
 
 #include "liquid.internal.h"
 
-#define DEBUG_FLEXFRAMESYNC         1
-#define DEBUG_FLEXFRAMESYNC_PRINT   0
+#define DEBUG_FLEXFRAMESYNC         0
+#define DEBUG_FLEXFRAMESYNC_PRINT   1
+#define DEBUG_FLEXFRAMESYNC_PROFILE 0
 #define DEBUG_FILENAME              "flexframesync_internal_debug.m"
 #define DEBUG_BUFFER_LEN            (2000)
 
 #define FLEXFRAMESYNC_ENABLE_EQ     0
+
+#define FRAC_SAMPLE_OFFSET_QUADRATIC_EST 1
 
 // push samples through detection stage
 void flexframesync_execute_seekpn(flexframesync _q,
@@ -69,6 +72,33 @@ void flexframesync_execute_rxheader(flexframesync _q,
 void flexframesync_execute_rxpayload(flexframesync _q,
                                      liquid_float_complex _x);
 
+void flexframesync_buffered_execute_seekpn (flexframesync _q,
+                                            liquid_float_complex * _x,
+                                            unsigned int _n,
+                                            unsigned int _pe,
+                                            unsigned int _pl);
+
+void
+flexframesync_buffered_correction (flexframesync _q,
+                                   liquid_float_complex * _x,
+                                   unsigned int _n);
+void
+flexframesync_buffered_execute_rxpreamble (
+  flexframesync _q,
+  liquid_float_complex * _x);
+
+void
+flexframesync_buffered_execute_rxheader (
+  flexframesync _q,
+  liquid_float_complex * _x);
+
+void
+flexframesync_buffered_execute_rxpayload (
+  flexframesync _q,
+  liquid_float_complex * _x);
+
+
+
 static flexframegenprops_s flexframesyncprops_header_default = {
    FLEXFRAME_H_CRC,
    FLEXFRAME_H_FEC0,
@@ -95,6 +125,7 @@ struct flexframesync_s {
     unsigned int    m;                  // filter delay (symbols)
     float           beta;               // filter excess bandwidth factor
     qdetector_cccf  detector;           // pre-demod detector
+    int             pn_offset;          // offset to the start of the PN seq
     float           tau_hat;            // fractional timing offset estimate
     float           dphi_hat;           // carrier frequency offset estimate
     float           phi_hat;            // carrier phase offset estimate
@@ -164,22 +195,24 @@ flexframesync flexframesync_create(framesync_callback _callback,
     q->userdata = _userdata;
     q->m        = 7;    // filter delay (symbols)
     q->beta     = 0.3f; // excess bandwidth factor
+    // KSK match the flexframegen beta... was 0.35f
+    q->beta     = 0.25f; // excess bandwidth factor
 
     unsigned int i;
 
     // generate p/n sequence
-    q->preamble_pn = (liquid_float_complex*) malloc(64*sizeof(liquid_float_complex));
-    q->preamble_rx = (liquid_float_complex*) malloc(64*sizeof(liquid_float_complex));
+    q->preamble_pn = (liquid_float_complex*) malloc(FLEXFRAME_H_PN_LEN*sizeof(liquid_float_complex));
+    q->preamble_rx = (liquid_float_complex*) malloc(FLEXFRAME_H_PN_LEN*sizeof(liquid_float_complex));
     msequence ms = msequence_create(7, 0x0089, 1);
-    for (i=0; i<64; i++) {
+    for (i=0; i<FLEXFRAME_H_PN_LEN; i++) {
         q->preamble_pn[i] = (msequence_advance(ms) ? (float)M_SQRT1_2 : (float)-M_SQRT1_2);
         q->preamble_pn[i] += (msequence_advance(ms) ? (float)M_SQRT1_2 : (float)-M_SQRT1_2) * _Complex_I;
     }
     msequence_destroy(ms);
 
     // create frame detector
-    unsigned int k = 2; // samples/symbol
-    q->detector = qdetector_cccf_create_linear(q->preamble_pn, 64, LIQUID_FIRFILT_ARKAISER, k, q->m, q->beta);
+    unsigned int k = FLEXFRAME_H_OVERSAMPLE_RATE; // samples/symbol
+    q->detector = qdetector_cccf_create_linear(q->preamble_pn, FLEXFRAME_H_PN_LEN, LIQUID_FIRFILT_ARKAISER, k, q->m, q->beta);
     qdetector_cccf_set_threshold(q->detector, 0.5f);
 
     // create symbol timing recovery filters
@@ -400,14 +433,17 @@ void flexframesync_execute(flexframesync   _q,
         switch (_q->state) {
         case FLEXFRAMESYNC_STATE_DETECTFRAME:
             // detect frame (look for p/n sequence)
+//          printf("i = %d\n",i);
             flexframesync_execute_seekpn(_q, _x[i]);
             break;
         case FLEXFRAMESYNC_STATE_RXPREAMBLE:
             // receive p/n sequence symbols
+//          printf("at i = %d single sample preamble counter = %d\n",i,_q->preamble_counter);
             flexframesync_execute_rxpreamble(_q, _x[i]);
             break;
         case FLEXFRAMESYNC_STATE_RXHEADER:
             // receive header symbols
+//          printf("at i = %d single sample preamble counter = %d\n",i,_q->preamble_counter);
             flexframesync_execute_rxheader(_q, _x[i]);
             break;
         case FLEXFRAMESYNC_STATE_RXPAYLOAD:
@@ -446,8 +482,8 @@ void flexframesync_execute_seekpn(flexframesync _q,
     _q->phi_hat   = qdetector_cccf_get_phi  (_q->detector);
 
 #if DEBUG_FLEXFRAMESYNC_PRINT
-    printf("***** frame detected! tau-hat:%8.4f, dphi-hat:%8.4f, gamma:%8.2f dB\n",
-            _q->tau_hat, _q->dphi_hat, 20*log10f(_q->gamma_hat));
+    printf("***** frame detected! tau-hat:%8.4f, dphi-hat:%8.4f, phi-hat:%8.4f, gamma:%8.2f dB\n",
+            _q->tau_hat, _q->dphi_hat, _q->phi_hat, 20*log10f(_q->gamma_hat));
 #endif
 
     // set appropriate filterbank index
@@ -459,8 +495,9 @@ void flexframesync_execute_seekpn(flexframesync _q,
         _q->mf_counter = 1;
     }
     
-    // output filter scale (gain estimate, scaled by 1/2 for k=2 samples/symbol)
-    firpfb_crcf_set_scale(_q->mf, 0.5f / _q->gamma_hat);
+    // output filter scale (gain estimate, scaled by 1/k for
+    // k=FLEXFRAME_H_OVERSAMPLE_RATE samples/symbol)
+    firpfb_crcf_set_scale(_q->mf, 1/((float) FLEXFRAME_H_OVERSAMPLE_RATE) / _q->gamma_hat);
 
     // set frequency/phase of mixer
     nco_crcf_set_frequency(_q->mixer, _q->dphi_hat);
@@ -517,8 +554,8 @@ int flexframesync_step(flexframesync   _q,
         // set output
         *_y = v;
 
-        // decrement counter by k=2 samples/symbol
-        _q->mf_counter -= 2;
+        // decrement counter by k=FLEXFRAME_H_OVERSAMPLE_RATE samples/symbol
+        _q->mf_counter -= FLEXFRAME_H_OVERSAMPLE_RATE;
     }
 
     // return flag
@@ -532,6 +569,7 @@ int flexframesync_step(flexframesync   _q,
 void flexframesync_execute_rxpreamble(flexframesync _q,
                                       liquid_float_complex _x)
 {
+//  printf("rxpreamble x %10.8f %10.8fj\n",creal(_x),cimag(_x));
     // step synchronizer
     liquid_float_complex mf_out = 0.0f;
     int sample_available = flexframesync_step(_q, _x, &mf_out);
@@ -541,14 +579,15 @@ void flexframesync_execute_rxpreamble(flexframesync _q,
 
         // save output in p/n symbols buffer
 #if FLEXFRAMESYNC_ENABLE_EQ
-        unsigned int delay = 2*_q->m + 3; // delay from matched filter and equalizer
+        unsigned int delay = FLEXFRAME_H_OVERSAMPLE_RATE*_q->m + 3; // delay from matched filter and equalizer
 #else
-        unsigned int delay = 2*_q->m;     // delay from matched filter
+        unsigned int delay = FLEXFRAME_H_OVERSAMPLE_RATE*_q->m;     // delay from matched filter
 #endif
         if (_q->preamble_counter >= delay) {
             unsigned int index = _q->preamble_counter-delay;
 
             _q->preamble_rx[index] = mf_out;
+//            printf("rxpreamble[%d] %10.8f %10.8fj\n",index,creal(mf_out),cimag(mf_out));
         
 #if FLEXFRAMESYNC_ENABLE_EQ
             // train equalizer
@@ -560,7 +599,7 @@ void flexframesync_execute_rxpreamble(flexframesync _q,
         _q->preamble_counter++;
 
         // update state
-        if (_q->preamble_counter == 64 + delay)
+        if (_q->preamble_counter == FLEXFRAME_H_PN_LEN + delay)
             _q->state = FLEXFRAMESYNC_STATE_RXHEADER;
     }
 }
@@ -821,6 +860,447 @@ void flexframesync_execute_rxpayload(flexframesync _q,
     }
 }
 
+/******************************************************************************
+ * Added Oct 5, 2017
+ *
+ * Non-Realtime Reception
+ *
+ * Methods to handle complete buffer of received samples, for example, from a
+ * TDMA system where and entire slot is captured and processed in non-realtime.
+ *
+ *****************************************************************************/
+// execute frame buffered synchronizer
+//  _q  :   frame synchronizer object
+//  _x  :   input sample array [size: _n x 1]
+//  _n  :   number of input samples
+//  _pe :   earliest expected sample of packet start
+//  _pl :   latest expected sample of packet start
+void
+flexframesync_buffered_execute (
+  flexframesync _q,
+  liquid_float_complex * _x,
+  unsigned int _n,
+  unsigned int _pe,
+  unsigned int _pl)
+{
+
+  // The assumption is that we have all the samples for a packet. That means
+  // that state only changes if the methods below change it before completing.
+  // If, after the method completes, the state is not what is expected,
+  // reset and exit. Since the callback will not have been invoked, the packet
+  // is effectively dropped.
+
+  if (_q->state == FLEXFRAMESYNC_STATE_DETECTFRAME)
+  {
+#if DEBUG_FLEXFRAMESYNC_PROFILE
+    struct timespec startTS, endTS;
+    clock_gettime (CLOCK_REALTIME, &startTS);
+    double s = startTS.tv_sec * 1.0 + startTS.tv_nsec / 1000000000.0;
+#endif
+    flexframesync_buffered_execute_seekpn (_q, _x, _n, _pe, _pl);
+#if DEBUG_FLEXFRAMESYNC_PROFILE
+    clock_gettime (CLOCK_REALTIME, &endTS);
+    double e = endTS.tv_sec * 1.0 + endTS.tv_nsec / 1000000000.0;
+    printf ("flexframesync_buffered_execute_seekpn duration = %12.9f s\n", e - s);
+    s = e;
+#endif
+
+    flexframesync_buffered_correction (_q, _x, _n);
+#if DEBUG_FLEXFRAMESYNC_PROFILE
+    clock_gettime (CLOCK_REALTIME, &endTS);
+    e = endTS.tv_sec * 1.0 + endTS.tv_nsec / 1000000000.0;
+    printf ("flexframesync_buffered_correction duration = %12.9f s\n", e - s);
+    s = e;
+#endif
+    if (_q->state == FLEXFRAMESYNC_STATE_RXPREAMBLE)
+    {
+      flexframesync_buffered_execute_rxpreamble (_q, _x);
+#if DEBUG_FLEXFRAMESYNC_PROFILE
+      clock_gettime (CLOCK_REALTIME, &endTS);
+      e = endTS.tv_sec * 1.0 + endTS.tv_nsec / 1000000000.0;
+      printf ("flexframesync_buffered_execute_rxpreamble duration = %12.9f s\n", e - s);
+      s = e;
+#endif
+    }
+
+    if (_q->state == FLEXFRAMESYNC_STATE_RXHEADER)
+    {
+      flexframesync_buffered_execute_rxheader (_q, _x + _q->preamble_counter);
+#if DEBUG_FLEXFRAMESYNC_PROFILE
+      clock_gettime (CLOCK_REALTIME, &endTS);
+      e = endTS.tv_sec * 1.0 + endTS.tv_nsec / 1000000000.0;
+      printf ("flexframesync_buffered_execute_rxheader duration = %12.9f s\n", e - s);
+      s = e;
+#endif
+    }
+
+    if (_q->state == FLEXFRAMESYNC_STATE_RXPAYLOAD)
+      flexframesync_buffered_execute_rxpayload (_q,
+        _x + _q->preamble_counter + _q->header_sym_len);
+#if DEBUG_FLEXFRAMESYNC_PROFILE
+    clock_gettime (CLOCK_REALTIME, &endTS);
+    e = endTS.tv_sec * 1.0 + endTS.tv_nsec / 1000000000.0;
+    printf ("flexframesync_buffered_execute_rxpayload duration = %12.9f s\n", e - s);
+#endif
+  }
+
+  // always reset frame synchronizer
+  flexframesync_reset (_q);
+}
+
+//
+// internal methods
+//
+
+// execute synchronizer, seeking p/n sequence
+//  _q  :   frame synchronizer object
+//  _x  :   input sample array [size: _n x 1]
+//  _n  :   number of input samples
+//  _pe :   earliest expected sample of packet start
+//  _pl :   latest expected sample of packet start
+void
+flexframesync_buffered_execute_seekpn (
+  flexframesync _q,
+  liquid_float_complex * _x,
+  unsigned int _n,
+  unsigned int _pe,
+  unsigned int _pl)
+{
+
+  qdetector_cccf_reset(_q->detector);
+ _q->pn_offset = qdetector_cccf_buffered_execute(_q->detector, _x, _n, _pe, _pl);
+
+  // check if frame has been detected
+  if (_q->pn_offset < 0)
+      return;
+
+  // get estimates
+  _q->tau_hat   = qdetector_cccf_get_tau  (_q->detector);
+  _q->gamma_hat = qdetector_cccf_get_gamma(_q->detector);
+  _q->dphi_hat  = qdetector_cccf_get_dphi (_q->detector);
+  _q->phi_hat   = qdetector_cccf_get_phi  (_q->detector);
+
+#if DEBUG_FLEXFRAMESYNC_PRINT
+  printf("***** frame detected! tau-hat:%8.4f, dphi-hat:%8.4f, phi-hat:%8.4f, gamma:%8.2f dB\n",
+          _q->tau_hat, _q->dphi_hat, _q->phi_hat, 20*log10f(_q->gamma_hat));
+#endif
+
+  // set appropriate filterbank index
+  if (_q->tau_hat > 0) {
+      _q->pfb_index = (unsigned int)(      _q->tau_hat  * _q->npfb) % _q->npfb;
+      _q->mf_counter = 0;
+  } else {
+      _q->pfb_index = (unsigned int)((1.0f+_q->tau_hat) * _q->npfb) % _q->npfb;
+      _q->mf_counter = 1;
+  }
+
+  // output filter scale (gain estimate, scaled by 1/k for
+  // k=FLEXFRAME_H_OVERSAMPLE_RATE samples/symbol)
+  firpfb_crcf_set_scale(_q->mf, 1/((float) FLEXFRAME_H_OVERSAMPLE_RATE) / _q->gamma_hat);
+
+  // set frequency/phase of mixer
+  nco_crcf_set_frequency(_q->mixer, _q->dphi_hat);
+  nco_crcf_set_phase    (_q->mixer, _q->phi_hat );
+
+  // update state
+  _q->state = FLEXFRAMESYNC_STATE_RXPREAMBLE;
+}
+
+// buffered receiver mixer, matched filter, decimator
+//  _q      :   frame synchronizer
+//  _x      :   input sample array [size: _n x 1]
+//  _n      :   number of input samples
+// return the number of corrected samples
+void
+flexframesync_buffered_correction(
+  flexframesync _q,
+  liquid_float_complex * _x,
+  unsigned int _n
+  )
+{
+  // Correct all the samples starting at the PN offset to the end of the buffer
+  // Place the corrected, down-sampled symbols back into _x starting at index 0
+  unsigned int sampleCount = 0;
+  unsigned int correctedIndex = 0;
+
+  unsigned int remainLen = _n - _q->pn_offset;
+  liquid_float_complex* rotVector = (liquid_float_complex*) malloc(remainLen*sizeof(liquid_float_complex));
+  liquid_float_complex* corrected = (liquid_float_complex*) malloc(remainLen*sizeof(liquid_float_complex));
+  float* dphiVector = (float*) malloc(remainLen*sizeof(float));
+
+#if DEBUG_FLEXFRAMESYNC_PROFILE
+  struct timespec startTS, endTS;
+  clock_gettime(CLOCK_REALTIME, &startTS);
+  double s = startTS.tv_sec*1.0 + startTS.tv_nsec/1000000000.0;
+#endif
+  // TODO this could be optimized for SIMD
+  float phi = _q->phi_hat;
+  for (unsigned int i = 0; i < remainLen; i++)
+  {
+    dphiVector[i] = phi;
+    phi += _q->dphi_hat;
+    if (phi > M_PI)
+        phi -= 2*M_PI;
+    else if (phi < -M_PI)
+        phi += 2*M_PI;
+  }
+#if DEBUG_FLEXFRAMESYNC_PROFILE
+  clock_gettime(CLOCK_REALTIME, &endTS);
+  double e = endTS.tv_sec*1.0 + endTS.tv_nsec/1000000000.0;
+  printf("make dphiVector duration = %12.9f s\n",e-s);
+  s = e;
+#endif
+
+  nco_crcf_mix_block_down_fast (_q->mixer, dphiVector, _x + _q->pn_offset, corrected, remainLen);
+#if DEBUG_FLEXFRAMESYNC_PROFILE
+  clock_gettime(CLOCK_REALTIME, &endTS);
+  e = endTS.tv_sec*1.0 + endTS.tv_nsec/1000000000.0;
+  printf("nco_mix_block_down2 duration = %12.9f s\n",e-s);
+  s = e;
+#endif
+
+  // TODO this could be optimized for SIMD
+  liquid_float_complex v;
+  sampleCount = 0;
+  for (unsigned int i = 0; i < remainLen; i++)
+  {
+    // push sample into filterbank
+    firpfb_crcf_push (_q->mf, corrected[i]);
+    firpfb_crcf_execute (_q->mf, _q->pfb_index, &v);
+    // increment counter to determine if sample is available
+    _q->mf_counter++;
+    int sample_available = (_q->mf_counter >= 1) ? 1 : 0;
+
+    // set output sample if available
+    if (sample_available)
+    {
+  #if FLEXFRAMESYNC_ENABLE_EQ
+      // compute equalizer output
+      eqlms_cccf_execute(_q->equalizer, &v);
+  #endif
+
+      // set output
+      _x[correctedIndex++] = v;
+      sampleCount++;
+
+      // decrement counter by k=FLEXFRAME_H_OVERSAMPLE_RATE samples/symbol
+      _q->mf_counter -= FLEXFRAME_H_OVERSAMPLE_RATE;
+    }
+
+  }
+#if DEBUG_FLEXFRAMESYNC_PROFILE
+  clock_gettime(CLOCK_REALTIME, &endTS);
+  e = endTS.tv_sec*1.0 + endTS.tv_nsec/1000000000.0;
+  printf("firpfb duration = %12.9f s\n",e-s);
+  printf("sampleCount = %d correctedIndex = %d\n",sampleCount,correctedIndex);
+  s = e;
+#endif
+
+  free(rotVector);
+  free(dphiVector);
+}
+
+// execute synchronizer, receiving p/n sequence
+//  _q     :   frame synchronizer object
+//  _x      :   corrected sample
+//  _sym    :   demodulated symbol
+void
+flexframesync_buffered_execute_rxpreamble (
+  flexframesync _q,
+  liquid_float_complex * _x)
+{
+#if FLEXFRAMESYNC_ENABLE_EQ
+    unsigned int delay = FLEXFRAME_H_OVERSAMPLE_RATE *_q->m + 3; // delay from matched filter and equalizer
+#else
+    unsigned int delay = FLEXFRAME_H_OVERSAMPLE_RATE * _q->m;     // delay from matched filter
+#endif
+
+  _q->preamble_counter = delay;
+  unsigned int index = 0;
+  while (_q->preamble_counter < FLEXFRAME_H_PN_LEN + delay)
+  {
+
+    // save output in p/n symbols buffer
+      _q->preamble_rx[index] = _x[_q->preamble_counter];
+//      printf("rxpreamble[%d] %10.8f %10.8fj\n",index,creal(_q->preamble_rx[index]),cimag(_q->preamble_rx[index]));
+      index++;
+
+
+#if FLEXFRAMESYNC_ENABLE_EQ
+      // TODO not set up for buffered processing.
+      // train equalizer
+      eqlms_cccf_step(_q->equalizer, _q->preamble_pn[index], mf_out);
+#endif
+
+    // update p/n counter
+    _q->preamble_counter++;
+
+    // update state
+    if (_q->preamble_counter == FLEXFRAME_H_PN_LEN + delay) _q->state =
+      FLEXFRAMESYNC_STATE_RXHEADER;
+  }
+
+}
+
+// execute synchronizer, receiving header
+//  _q      :   frame synchronizer object
+//  _x      :   input sample
+//  _sym    :   demodulated symbol
+void
+flexframesync_buffered_execute_rxheader (
+  flexframesync _q,
+  liquid_float_complex * _x)
+{
+
+  // Just move the samples into the header symbol buffer. If they are all not
+  // there or incorrect, the CRC check will catch that...
+  memmove( _q->header_sym, _x, _q->header_sym_len*sizeof(liquid_float_complex));
+  _q->symbol_counter = _q->header_sym_len;
+
+  // decode header
+  flexframesync_decode_header (_q);
+
+  if (_q->header_valid)
+  {
+    // continue on to decoding payload
+    _q->symbol_counter = 0;
+    _q->state = FLEXFRAMESYNC_STATE_RXPAYLOAD;
+    return;
+  }
+
+  // update statistics
+  _q->framedatastats.num_frames_detected++;
+
+  // header invalid: invoke callback
+  if (_q->callback != NULL)
+  {
+    // set framestats internals
+    _q->framesyncstats.evm = 0.0f; //20*log10f(sqrtf(_q->framesyncstats.evm / 600));
+    _q->framesyncstats.rssi = 20 * log10f (_q->gamma_hat);
+    _q->framesyncstats.cfo = nco_crcf_get_frequency (_q->mixer);
+    _q->framesyncstats.framesyms = NULL;
+    _q->framesyncstats.num_framesyms = 0;
+    _q->framesyncstats.mod_scheme = LIQUID_MODEM_UNKNOWN;
+    _q->framesyncstats.mod_bps = 0;
+    _q->framesyncstats.check = LIQUID_CRC_UNKNOWN;
+    _q->framesyncstats.fec0 = LIQUID_FEC_UNKNOWN;
+    _q->framesyncstats.fec1 = LIQUID_FEC_UNKNOWN;
+
+    // invoke callback method
+    _q->callback (_q->header_dec, _q->header_valid,
+    NULL,  // payload
+      0,     // payload length
+      0,     // payload valid,
+      _q->framesyncstats, _q->userdata);
+  }
+
+  // reset frame synchronizer
+  flexframesync_reset (_q);
+}
+
+// execute synchronizer, receiving payload
+//  _q      :   frame synchronizer object
+//  _x      :   input sample
+//  _sym    :   demodulated symbol
+void
+flexframesync_buffered_execute_rxpayload (
+  flexframesync _q,
+  liquid_float_complex * _x)
+{
+
+#if DEBUG_FLEXFRAMESYNC_PROFILE
+  struct timespec startTS, endTS;
+  clock_gettime (CLOCK_REALTIME, &startTS);
+  double s = startTS.tv_sec * 1.0 + startTS.tv_nsec / 1000000000.0;
+#endif
+
+  // TODO optimize using SIMD
+  liquid_float_complex mf_out = 0.0f;
+  while (_q->symbol_counter < _q->payload_sym_len)
+  {
+    // TODO: clean this up
+    // mix down with fine-tuned oscillator
+    nco_crcf_mix_down (_q->pll, _x[_q->symbol_counter], &mf_out);
+    // track phase, accumulate error-vector magnitude
+    unsigned int sym;
+    modem_demodulate (_q->payload_demod, mf_out, &sym);
+    float phase_error = modem_get_demodulator_phase_error (_q->payload_demod);
+    float evm = modem_get_demodulator_evm (_q->payload_demod);
+    nco_crcf_pll_step (_q->pll, phase_error);
+    nco_crcf_step (_q->pll);
+    _q->framesyncstats.evm += evm * evm;
+
+    // save payload symbols (modem input/output)
+    _q->payload_sym[_q->symbol_counter] = mf_out;
+
+    // increment counter
+    _q->symbol_counter++;
+  }
+#if DEBUG_FLEXFRAMESYNC_PROFILE
+  clock_gettime (CLOCK_REALTIME, &endTS);
+  double e = endTS.tv_sec * 1.0 + endTS.tv_nsec / 1000000000.0;
+  printf ("flexframesync_buffered_execute_rxpayload loop duration = %12.9f s\n", e - s);
+  s = e;
+#endif
+
+  // TODO optimize using SIMD
+  if (_q->symbol_counter == _q->payload_sym_len)
+  {
+    // decode payload
+    if (_q->payload_soft)
+    {
+      _q->payload_valid = qpacketmodem_decode_soft (_q->payload_decoder,
+        _q->payload_sym, _q->payload_dec);
+    }
+    else
+    {
+      _q->payload_valid = qpacketmodem_decode (_q->payload_decoder,
+        _q->payload_sym, _q->payload_dec);
+    }
+
+    // update statistics
+    _q->framedatastats.num_frames_detected++;
+    _q->framedatastats.num_headers_valid++;
+    _q->framedatastats.num_payloads_valid += _q->payload_valid;
+    _q->framedatastats.num_bytes_received += _q->payload_dec_len;
+
+    // invoke callback
+    if (_q->callback != NULL)
+    {
+      // set framestats internals
+      int ms = qpacketmodem_get_modscheme (_q->payload_decoder);
+      _q->framesyncstats.evm = 10
+        * log10f (_q->framesyncstats.evm / (float) _q->payload_sym_len);
+      _q->framesyncstats.rssi = 20 * log10f (_q->gamma_hat);
+      _q->framesyncstats.cfo = nco_crcf_get_frequency (_q->mixer);
+      _q->framesyncstats.framesyms = _q->payload_sym;
+      _q->framesyncstats.num_framesyms = _q->payload_sym_len;
+      _q->framesyncstats.mod_scheme = ms;
+      _q->framesyncstats.mod_bps = modulation_types[ms].bps;
+      _q->framesyncstats.check = qpacketmodem_get_crc (_q->payload_decoder);
+      _q->framesyncstats.fec0 = qpacketmodem_get_fec0 (_q->payload_decoder);
+      _q->framesyncstats.fec1 = qpacketmodem_get_fec1 (_q->payload_decoder);
+
+      // invoke callback method
+      _q->callback (_q->header_dec, _q->header_valid, _q->payload_dec,
+        _q->payload_dec_len, _q->payload_valid, _q->framesyncstats,
+        _q->userdata);
+    }
+
+    // reset frame synchronizer
+    flexframesync_reset (_q);
+  }
+#if DEBUG_FLEXFRAMESYNC_PROFILE
+    clock_gettime (CLOCK_REALTIME, &endTS);
+    e = endTS.tv_sec * 1.0 + endTS.tv_nsec / 1000000000.0;
+    printf ("flexframesync_buffered_execute_rxpayload demod duration = %12.9f s\n", e - s);
+#endif
+}
+
+/******************************************************************************
+ * Non-Realtime Reception
+ *****************************************************************************/
+
 // reset frame data statistics
 void flexframesync_reset_framedatastats(flexframesync _q)
 {
@@ -897,15 +1377,15 @@ void flexframesync_debug_print(flexframesync _q,
     fprintf(fid,"ylabel('received signal, x');\n");
 
     // write p/n sequence
-    fprintf(fid,"preamble_pn = zeros(1,64);\n");
+    fprintf(fid,"preamble_pn = zeros(1,FLEXFRAME_H_PN_LEN);\n");
     rc = _q->preamble_pn;
-    for (i=0; i<64; i++)
+    for (i=0; i<FLEXFRAME_H_PN_LEN; i++)
         fprintf(fid,"preamble_pn(%4u) = %12.4e + 1i*%12.4e;\n", i+1, crealf(rc[i]), cimagf(rc[i]));
 
     // write p/n symbols
-    fprintf(fid,"preamble_rx = zeros(1,64);\n");
+    fprintf(fid,"preamble_rx = zeros(1,FLEXFRAME_H_PN_LEN);\n");
     rc = _q->preamble_rx;
-    for (i=0; i<64; i++)
+    for (i=0; i<FLEXFRAME_H_PN_LEN; i++)
         fprintf(fid,"preamble_rx(%4u) = %12.4e + 1i*%12.4e;\n", i+1, crealf(rc[i]), cimagf(rc[i]));
 
     // write recovered header symbols (after qpilotsync)

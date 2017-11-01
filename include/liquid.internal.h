@@ -1145,12 +1145,14 @@ void bpacketsync_reconfig(bpacketsync _q);
 //       which also generates a 54-byte frame. Improves header decoding
 //       by about 1 dB (99% probability of decoding with SNR = -1 dB);
 //       however this requires that the 'libfec' libraries are installed.
-#define FLEXFRAME_H_USER_DEFAULT (14)                    // default length for user-defined array
-#define FLEXFRAME_H_DEC          (6)                     // decoded length
-#define FLEXFRAME_H_CRC          (LIQUID_CRC_32)         // header CRC
-#define FLEXFRAME_H_FEC0         (LIQUID_FEC_SECDED7264) // header FEC (inner)
-#define FLEXFRAME_H_FEC1         (LIQUID_FEC_HAMMING84)  // header FEC (outer)
-#define FLEXFRAME_H_MOD          (LIQUID_MODEM_QPSK)     // modulation scheme
+#define FLEXFRAME_H_PN_LEN          (64)                    // default pn sequence length
+#define FLEXFRAME_H_OVERSAMPLE_RATE (2)                     // default oversample rate
+#define FLEXFRAME_H_USER_DEFAULT    (14)                    // default length for user-defined array
+#define FLEXFRAME_H_DEC             (6)                     // decoded length
+#define FLEXFRAME_H_CRC             (LIQUID_CRC_32)         // header CRC
+#define FLEXFRAME_H_FEC0            (LIQUID_FEC_SECDED7264) // header FEC (inner)
+#define FLEXFRAME_H_FEC1            (LIQUID_FEC_HAMMING84)  // header FEC (outer)
+#define FLEXFRAME_H_MOD             (LIQUID_MODEM_QPSK)     // modulation scheme
 
 
 // 

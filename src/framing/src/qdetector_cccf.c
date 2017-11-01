@@ -33,7 +33,7 @@
 #include "liquid.internal.h"
 
 #define DEBUG_QDETECTOR              0
-#define DEBUG_QDETECTOR_PRINT        0
+#define DEBUG_QDETECTOR_PRINT        1
 #define DEBUG_QDETECTOR_FILENAME     "qdetector_cccf_debug.m"
 
 // seek signal (initial detection)
@@ -44,6 +44,18 @@ void qdetector_cccf_execute_seek(qdetector_cccf _q,
 void qdetector_cccf_execute_align(qdetector_cccf _q,
                                   liquid_float_complex  _x);
 
+// seek signal (initial detection)
+void qdetector_cccf_buffered_execute_seek(qdetector_cccf _q,
+                                 liquid_float_complex *  _x,
+                                 unsigned int            _n,
+                                 unsigned int            _pe,
+                                 unsigned int            _pl);
+
+// align signal in time, compute offset estimates
+void qdetector_cccf_buffered_execute_align(qdetector_cccf _q,
+                                  liquid_float_complex * _x,
+                                  unsigned int _n);
+
 enum state {
     QDETECTOR_STATE_SEEK,       // seek sequence
     QDETECTOR_STATE_ALIGN,      // align sequence
@@ -52,9 +64,11 @@ enum state {
 // main object definition
 struct qdetector_cccf_s {
     unsigned int    s_len;          // template (time) length: k * (sequence_len + 2*m)
-    liquid_float_complex * s;              // template (time), [size: s_len x 1]
-    liquid_float_complex * S;              // template (freq), [size: nfft x 1]
+    liquid_float_complex * s;       // template (time), [size: s_len x 1]
+    liquid_float_complex * s_star;  // conjugate template (time), [size: s_len x 1]
+    liquid_float_complex * S;       // template (freq), [size: nfft x 1]
     float           s2_sum;         // sum{ s^2 }
+    dotprod_cccf    dp;                 // dot product calculation
 
     liquid_float_complex * buf_time_0;     // time-domain buffer (FFT)
     liquid_float_complex * buf_freq_0;     // frequence-domain buffer (FFT)
@@ -101,7 +115,11 @@ qdetector_cccf qdetector_cccf_create(liquid_float_complex * _s,
     // allocate memory and copy sequence
     q->s = (liquid_float_complex*) malloc(q->s_len * sizeof(liquid_float_complex));
     memmove(q->s, _s, q->s_len*sizeof(liquid_float_complex));
+    q->s_star = (liquid_float_complex*) malloc(q->s_len * sizeof(liquid_float_complex));
+    for (unsigned int i = 0; i < q->s_len; i++)
+      q->s_star[i] = conjf(q->s[i]);
     q->s2_sum = liquid_sumsqcf(q->s, q->s_len); // compute sum{ s^2 }
+    q->dp = dotprod_cccf_create ((void *)q->s_star, _s_len);
 
     // prepare transforms
     q->nfft       = 1 << liquid_nextpow2( (unsigned int)( 2 * q->s_len ) ); // NOTE: must be even
@@ -137,6 +155,7 @@ qdetector_cccf qdetector_cccf_create(liquid_float_complex * _s,
 
     qdetector_cccf_set_threshold(q,0.5f);
     qdetector_cccf_set_range    (q,0.3f); // set initial range for higher detection
+    qdetector_cccf_set_range    (q,0.075398f); // set initial range for higher detection
 
     // return object
     return q;
@@ -248,6 +267,7 @@ void qdetector_cccf_destroy(qdetector_cccf _q)
     free(_q->buf_time_1);
 
     // destroy objects
+    dotprod_cccf_destroy(_q->dp);
     fft_destroy_plan(_q->fft);
     fft_destroy_plan(_q->ifft);
 
@@ -266,6 +286,7 @@ void qdetector_cccf_print(qdetector_cccf _q)
 
 void qdetector_cccf_reset(qdetector_cccf _q)
 {
+  _q->state = QDETECTOR_STATE_SEEK;
 }
 
 void * qdetector_cccf_execute(qdetector_cccf _q,
@@ -296,6 +317,38 @@ void * qdetector_cccf_execute(qdetector_cccf _q,
     return NULL;
 }
 
+// execute detector over entire frame buffer, looking for pn sequence
+// if found, return offset into _x where it starts
+// otherwise return < 0
+//
+//  _q  :   detector object
+//  _x  :   input sample array [size: _n x 1]
+//  _n  :   number of input samples
+//  _pe :   earliest expected sample of packet start
+//  _pl :   latest expected sample of packet start
+int qdetector_cccf_buffered_execute(qdetector_cccf         _q,
+                                       liquid_float_complex * _x,
+                                       unsigned int           _n,
+                                       unsigned int           _pe,
+                                       unsigned int           _pl)
+{
+  printf ("qdetector_cccf_buffered_execute\n");
+
+  qdetector_cccf_buffered_execute_seek (_q, _x, _n, _pe, _pl);
+
+  // If the PN sequence was detected, the next state will be triggered...
+  if (_q->state == QDETECTOR_STATE_ALIGN)
+  {
+    qdetector_cccf_buffered_execute_align (_q, _x, _n);
+
+    // clear flag
+    _q->frame_detected = 0;
+
+  }
+
+  return _q->offset;
+}
+
 // set detection threshold (should be between 0 and 1, good starting point is 0.5)
 void qdetector_cccf_set_threshold(qdetector_cccf _q,
                                   float          _threshold)
@@ -324,6 +377,12 @@ void qdetector_cccf_set_range(qdetector_cccf _q,
     //printf("range: %d / %u\n", _q->range, _q->nfft);
 }
 
+int qdetector_cccf_carrier_offset_index(qdetector_cccf _q,
+                                        float _dphi_hat)
+{
+  return (int) (_dphi_hat * _q->nfft / (2*M_PI));
+}
+
 // get sequence length
 unsigned int qdetector_cccf_get_seq_len(qdetector_cccf _q)
 {
@@ -334,6 +393,18 @@ unsigned int qdetector_cccf_get_seq_len(qdetector_cccf _q)
 const void * qdetector_cccf_get_sequence(qdetector_cccf _q)
 {
     return (const void*) _q->s;
+}
+
+// pointer to sequence
+const float qdetector_cccf_get_sequence_sumsq(qdetector_cccf _q)
+{
+    return (const float) _q->s2_sum;
+}
+
+// pointer to conjugate sequence
+const void * qdetector_cccf_get_conj_sequence(qdetector_cccf _q)
+{
+    return (const void*) _q->s_star;
 }
 
 // buffer length
@@ -384,6 +455,8 @@ void qdetector_cccf_execute_seek(qdetector_cccf _q,
     if (_q->counter < _q->nfft)
         return;
     
+    printf("x2_sum_1 = %10.6f over %d samples\n",_q->x2_sum_1,_q->counter);
+
     // reset counter (last half of time buffer)
     _q->counter = _q->nfft/2;
 
@@ -453,7 +526,7 @@ void qdetector_cccf_execute_seek(qdetector_cccf _q,
 
     if (rxy_peak > _q->threshold && rxy_index < _q->nfft - _q->s_len) {
 #if DEBUG_QDETECTOR_PRINT
-        printf("*** frame detected! rxy = %12.8f, time index=%u, freq. offset=%d\n", rxy_peak, rxy_index, rxy_offset);
+      printf("*** frame detected! nfft = %d, rxy = %12.8f, time index=%u, freq. offset=%d\n", _q->nfft, rxy_peak, rxy_index, rxy_offset);
 #endif
         // update state, reset counter, copy buffer appropriately
         _q->state = QDETECTOR_STATE_ALIGN;
@@ -606,5 +679,199 @@ void qdetector_cccf_execute_align(qdetector_cccf _q,
     _q->x2_sum_0 = liquid_sumsqcf(_q->buf_time_0, _q->nfft/2);
     _q->x2_sum_1 = 0;
     _q->counter = _q->nfft/2;
+printf("  offset = %d counter = %d\n",_q->offset,_q->counter);
+
+}
+
+// seek signal (initial detection)
+void qdetector_cccf_buffered_execute_seek(qdetector_cccf _q,
+                                 liquid_float_complex *  _x,
+                                 unsigned int            _n,
+                                 unsigned int            _pe,
+                                 unsigned int            _pl)
+{
+  // Assume that the PN sequence is not found
+  _q->offset = -1;
+
+  // Seach in the time domain for the start of the PN sequence.
+  // Compute the cross correlation between the input samples and the PN seq.
+  //
+  // TODO bounds check? _n - _pl + 1 >= _q->s_len?
+
+  unsigned int searchEnd, searchLen;
+  if (_n - _pl >= _q->s_len)
+    searchEnd = _pl;
+  else
+    searchEnd = _n - _q->s_len;
+  searchLen = searchEnd - _pe + 1;
+  // Search for the start of the PN sequence in _x via cross-correlation
+  float Rsq;
+  liquid_float_complex *R = (liquid_float_complex *) malloc (
+    searchLen * sizeof(liquid_float_complex *));
+  float rxy_peak = 0.0;
+  unsigned int rxy_index = 0;
+  unsigned int cm = 0;
+  for (unsigned int i = _pe; i < searchEnd; i++)
+  {
+    dotprod_cccf_execute (_q->dp, _x + i, R + cm);
+    Rsq = crealf (R[cm]) * crealf (R[cm]) + cimagf (R[cm]) * cimagf (R[cm]);
+    if (Rsq >= rxy_peak)
+    {
+      rxy_peak = Rsq;
+      rxy_index = i;
+    }
+    cm++;
+  }
+
+  float totalPower = liquid_sumsqcf (R + rxy_index, _q->s_len) / _q->s_len;
+
+#if DEBUG_QDETECTOR_PRINT
+  printf ("max = %10.8f at %d totalPower = %10.6f ratio = %10.8f\n", rxy_peak,
+    rxy_index, totalPower, rxy_peak / totalPower);
+#endif
+
+  // The correlation peak is at least 25 times the total power for SNRs >= 0dB.
+  // So, if max is not more than 20 times the total power, we don't have a peak.
+  // TODO is there not an analytic way to determine the threshold?
+
+  // TODO SNR >= 0 dB required for good dPhi estimate
+
+  if (totalPower * 20.0 < rxy_peak)
+  {
+#if DEBUG_QDETECTOR_PRINT
+    printf ("*** PN sequence detected;");
+#endif
+    // update state and save the start of the PN sequence in _x
+    _q->state = QDETECTOR_STATE_ALIGN;
+    _q->offset = rxy_index;
+  }
+  else
+  {
+#if DEBUG_QDETECTOR_PRINT
+    printf ("PN sequence not detected;");
+#endif
+  }
+#if DEBUG_QDETECTOR_PRINT
+  printf (" rxy = %12.8f, PN start = %u\n", rxy_peak, rxy_index);
+#endif
+
+  free (R);
+}
+
+// align signal in time, compute offset estimates
+void qdetector_cccf_buffered_execute_align(qdetector_cccf _q,
+                                  liquid_float_complex * _x,
+                                  unsigned int _n)
+{
+  // The seek method provided coarse alignment.
+  // Search in the frequency domain for the timing and frequency offsets.
+
+  // Find the frequency offset
+
+  // fill time domain buffer with only the input samples that match PN seq
+  memset(_q->buf_time_0, 0x00, _q->nfft*sizeof(liquid_float_complex));
+  memmove(_q->buf_time_0, _x +  _q->offset, _q->s_len*sizeof(liquid_float_complex));
+
+  // multiple the complex conjugate of the PN sequence with input sequence
+  // and compute the frequeny shift in the frequency domain
+  for (unsigned int i=0; i< _q->s_len; i++)
+    _q->buf_time_0[i] *= _q->s_star[i];
+  fft_execute(_q->fft);
+
+  // TODO The peak should always be within a small sub-range of the freq
+  // domain cross-correlation. Empirically we can reliably handle inter-
+  // sample phase shifts of up to ~0.03 radians. Assuming a 2 ppm clock
+  // stability and max fc = 6000 MHz, this means the lowest sample rate that
+  // can be employed is (2 pi 6000 2) / 0.03 = 2.514 MSps
+  //
+  float        v0 = 0.0f;
+  unsigned int i0 = 0;
+  for (unsigned int i=0; i<_q->nfft; i++) {
+      float v_abs = cabsf(_q->buf_freq_0[i]);
+      if (v_abs > v0) {
+          v0 = v_abs;
+          i0 = i;
+      }
+  }
+
+  // interpolate using quadratic polynomial for carrier frequency estimate
+  unsigned int ineg = (i0 + _q->nfft - 1)%_q->nfft;
+  unsigned int ipos = (i0            + 1)%_q->nfft;
+  float        vneg = cabsf(_q->buf_freq_0[ineg]);
+  float        vpos = cabsf(_q->buf_freq_0[ipos]);
+  float a           =  0.5f*(vpos + vneg) - v0;
+  float b           =  0.5f*(vpos - vneg);
+  //c            =  v0;
+  float idx    = -b / (2.0f*a); //-0.5f*(vpos - vneg) / (vpos + vneg - 2*v0);
+  float index  = (float)i0 + idx;
+  _q->dphi_hat = (i0 > _q->nfft/2 ? index-(float)_q->nfft : index) * 2*M_PI / (float)(_q->nfft);
+
+  // estimate carrier phase offset
+#if 0
+  // METHOD 1: linear interpolation of phase in FFT output buffer
+  float p0     = cargf(_q->buf_freq_0[ idx < 0 ? ineg : i0   ]);
+  float p1     = cargf(_q->buf_freq_0[ idx < 0 ? i0   : ipos ]);
+  float xp     = idx < 0 ? 1+idx : idx;
+  _q->phi_hat  = (p1-p0)*xp + p0;
+  //printf("v0 = %12.8f, v1 = %12.8f, xp = %12.8f\n", v0, v1, xp);
+#else
+  // METHOD 2: compute metric by de-rotating signal and measuring resulting phase
+  // NOTE: this is possibly more accurate than the above method but might also
+  //       be more computationally complex
+  liquid_float_complex metric = 0;
+  for (unsigned int i=0; i<_q->s_len; i++)
+      metric += _q->buf_time_0[i] * cexpf(-_Complex_I*(float)(_q->dphi_hat*i));
+  //printf("metric : %12.8f <%12.8f>\n", cabsf(metric), cargf(metric));
+  _q->phi_hat = cargf(metric);
+#endif
+
+  // cross-multiply frequency-domain components, aligning appropriately with
+  // estimated FFT offset index due to carrier frequency offset in received signal
+  int freq_offset = qdetector_cccf_carrier_offset_index(_q, _q->dphi_hat);
+  printf("frequency offset = %d\n",freq_offset);
+
+  memset(_q->buf_time_0, 0x00, _q->nfft*sizeof(liquid_float_complex));
+  memmove(_q->buf_time_0, _x +  _q->offset, _q->nfft*sizeof(liquid_float_complex));
+
+  // estimate timing offset
+  fft_execute(_q->fft);
+
+  unsigned int i;
+  for (i=0; i<_q->nfft; i++) {
+      // shifted index
+      unsigned int j = (i + _q->nfft - freq_offset) % _q->nfft;
+      _q->buf_freq_1[i] = _q->buf_freq_0[i] * conjf(_q->S[j]);
+  }
+  fft_execute(_q->ifft);
+
+  // time aligned to index 0
+  // NOTE: taking the sqrt removes bias in the timing estimate, but messes up gamma estimate
+  float yneg = cabsf(_q->buf_time_1[_q->nfft-1]);  yneg = sqrtf(yneg);
+  float y0   = cabsf(_q->buf_time_1[         0]);  y0   = sqrtf(y0  );
+  float ypos = cabsf(_q->buf_time_1[         1]);  ypos = sqrtf(ypos);
+  // compute timing offset estimate from quadratic polynomial fit
+  //  y = a x^2 + b x + c, [xneg = -1, x0 = 0, xpos = +1]
+  a     =  0.5f*(ypos + yneg) - y0;
+  b     =  0.5f*(ypos - yneg);
+  float c     =  y0;
+  printf("a = %10.4f b = %10.4f c = %10.4f \n",a,b,c);
+  _q->tau_hat = -b / (2.0f*a); //-0.5f*(ypos - yneg) / (ypos + yneg - 2*y0);
+  float g_hat   = (a*_q->tau_hat*_q->tau_hat + b*_q->tau_hat + c);
+  _q->gamma_hat = g_hat * g_hat / ((float)(_q->nfft) * _q->s2_sum); // g_hat^2 because of sqrt for yneg/y0/ypos
+
+#if DEBUG_QDETECTOR_PRINT
+  printf("  y[    -1] : %12.8f\n", yneg);
+  printf("  y[     0] : %12.8f\n", y0  );
+  printf("  y[    +1] : %12.8f\n", ypos);
+  printf("  tau-hat   : %12.8f\n", _q->tau_hat);
+  //printf("  g-hat:    : %12.8f\n", g_hat);
+  printf("  gamma-hat : %12.8f\n", _q->gamma_hat);
+  printf("  v[%4u-1] : %12.8f\n", i0,vneg);
+  printf("  v[%4u+0] : %12.8f\n", i0,v0  );
+  printf("  v[%4u+1] : %12.8f\n", i0,vpos);
+  printf("  dphi-hat  : %12.8f\n", _q->dphi_hat);
+  printf("  phi-hat   : %12.8f\n", _q->phi_hat);
+#endif
+
 }
 
