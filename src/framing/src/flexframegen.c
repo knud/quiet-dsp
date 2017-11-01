@@ -78,7 +78,7 @@ struct flexframegen_s {
     unsigned int    m;                  // interp filter delay (symbols)
     float           beta;               // excess bandwidth factor
     firinterp_crcf  interp;             // interpolator object
-    liquid_float_complex   buf_interp[2];      // output interpolator buffer [size: k x 1]
+    liquid_float_complex   buf_interp[FLEXFRAME_H_OVERSAMPLE_RATE];      // output interpolator buffer [size: k x 1]
 
     flexframegenprops_s props;          // payload properties
     flexframegenprops_s header_props;   // header properties
@@ -117,15 +117,15 @@ flexframegen flexframegen_create(flexframegenprops_s * _fgprops)
     unsigned int i;
 
     // create pulse-shaping filter
-    q->k      = 2;
+    q->k      = FLEXFRAME_H_OVERSAMPLE_RATE;
     q->m      = 7;
     q->beta   = 0.25f;
     q->interp = firinterp_crcf_create_prototype(LIQUID_FIRFILT_ARKAISER,q->k,q->m,q->beta,0);
 
     // generate pn sequence
-    q->preamble_pn = (liquid_float_complex *) malloc(64*sizeof(liquid_float_complex));
+    q->preamble_pn = (liquid_float_complex *) malloc(FLEXFRAME_H_PN_LEN*sizeof(liquid_float_complex));
     msequence ms = msequence_create(7, 0x0089, 1);
-    for (i=0; i<64; i++) {
+    for (i=0; i<FLEXFRAME_H_PN_LEN; i++) {
         q->preamble_pn[i] = (msequence_advance(ms) ? (float)M_SQRT1_2 : (float)-M_SQRT1_2);
         q->preamble_pn[i] += (msequence_advance(ms) ? (float)M_SQRT1_2 : (float)-M_SQRT1_2) * _Complex_I;
     }
@@ -179,7 +179,7 @@ void flexframegen_destroy(flexframegen _q)
 void flexframegen_print(flexframegen _q)
 {
     unsigned int num_frame_symbols =
-            64 +                    // preamble p/n sequence length
+            FLEXFRAME_H_PN_LEN +    // preamble p/n sequence length
             _q->header_sym_len +    // header symbols
             _q->payload_sym_len +   // number of modulation symbols
             2*_q->m;                // number of tail symbols
@@ -188,7 +188,7 @@ void flexframegen_print(flexframegen _q)
 
     printf("flexframegen:\n");
     printf("  head          : %u symbols\n", _q->m);
-    printf("  preamble      : %u\n", 64);
+    printf("  preamble      : %u\n", FLEXFRAME_H_PN_LEN);
     printf("  header        : %u symbols (%u bytes)\n", _q->header_sym_len, _q->header_dec_len);
     printf("  payload       : %u symbols (%u bytes)\n", _q->payload_sym_len, _q->payload_dec_len);
     printf("    payload crc : %s\n", crc_scheme_str[_q->props.check][1]);
@@ -301,7 +301,7 @@ void flexframegen_set_header_len(flexframegen   _q,
     _q->header_pilotgen = qpilotgen_create(_q->header_mod_len, 16);
     _q->header_sym_len  = qpilotgen_get_frame_len(_q->header_pilotgen);
     _q->header_sym      = (liquid_float_complex *) realloc(_q->header_sym, _q->header_sym_len*sizeof(liquid_float_complex));
-    //printf("header: %u bytes > %u mod > %u sym\n", 64, _q->header_mod_len, _q->header_sym_len);
+    //printf("header: %u bytes > %u mod > %u sym\n", FLEXFRAME_H_PN_LEN, _q->header_mod_len, _q->header_sym_len);
 }
 
 int flexframegen_set_header_props(flexframegen          _q,
@@ -346,7 +346,7 @@ unsigned int flexframegen_getframelen(flexframegen _q)
         return 0;
     }
     unsigned int num_frame_symbols =
-            64 +                    // preamble p/n sequence length
+            FLEXFRAME_H_PN_LEN +    // preamble p/n sequence length
             _q->header_sym_len +    // header symbols
             _q->payload_sym_len +   // number of modulation symbols
             2*_q->m;                // number of tail symbols
@@ -436,6 +436,10 @@ int flexframegen_write_samples(flexframegen    _q,
         
         // write output sample from interpolator buffer
         _buffer[i] = _q->buf_interp[_q->sample_counter];
+//        if (_q->state == STATE_PREAMBLE)
+//        {
+//          printf("preamble symbol %d = %10.8f j %10.8f\n",i,crealf(_buffer[i]),cimagf(_buffer[i]));
+//        }
             
         // adjust sample counter
         _q->sample_counter = (_q->sample_counter + 1) % _q->k;
@@ -497,7 +501,7 @@ liquid_float_complex flexframegen_generate_preamble(flexframegen _q)
     liquid_float_complex symbol = _q->preamble_pn[_q->symbol_counter++];
 
     // check state
-    if (_q->symbol_counter == 64) {
+    if (_q->symbol_counter == FLEXFRAME_H_PN_LEN) {
         _q->symbol_counter = 0;
         _q->state = STATE_HEADER;
     }
