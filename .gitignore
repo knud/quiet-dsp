@@ -31,9 +31,13 @@ xautotest
 
 # miscellany
 octave-core
+octave-workspace
 *.tar
 *.gz
 .DS_Store
+.project
+.settings
+.cproject
 
 # gentab programs
 src/fec/gentab/*_gentab
