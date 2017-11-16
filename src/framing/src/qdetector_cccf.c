@@ -36,6 +36,9 @@
 #define DEBUG_QDETECTOR_PRINT        1
 #define DEBUG_QDETECTOR_FILENAME     "qdetector_cccf_debug.m"
 
+//TODO move this to a general configuration of some kind
+#define QDETECTOR_RX_BITS 12
+
 // seek signal (initial detection)
 void qdetector_cccf_execute_seek(qdetector_cccf _q,
                                  liquid_float_complex  _x);
@@ -94,6 +97,8 @@ struct qdetector_cccf_s {
 
     enum state      state;          // execution state
     int             frame_detected; // frame detected?
+
+    float           min_sample_mag; // smallest received sample I or Q magnitude
 };
 
 // create detector with generic sequence
@@ -156,6 +161,8 @@ qdetector_cccf qdetector_cccf_create(liquid_float_complex * _s,
     qdetector_cccf_set_threshold(q,0.5f);
     qdetector_cccf_set_range    (q,0.3f); // set initial range for higher detection
     qdetector_cccf_set_range    (q,0.075398f); // set initial range for higher detection
+
+    q->min_sample_mag = 1.0 / (1 << (QDETECTOR_RX_BITS - 1));
 
     // return object
     return q;
@@ -332,8 +339,6 @@ int qdetector_cccf_buffered_execute(qdetector_cccf         _q,
                                        unsigned int           _pe,
                                        unsigned int           _pl)
 {
-  printf ("qdetector_cccf_buffered_execute\n");
-
   qdetector_cccf_buffered_execute_seek (_q, _x, _n, _pe, _pl);
 
   // If the PN sequence was detected, the next state will be triggered...
@@ -703,7 +708,7 @@ void qdetector_cccf_buffered_execute_seek(qdetector_cccf _q,
     searchEnd = _pl;
   else
     searchEnd = _n - _q->s_len;
-  searchLen = searchEnd - _pe + 1;
+  searchLen = searchEnd - _pe;
   // Search for the start of the PN sequence in _x via cross-correlation
   float Rsq;
   liquid_float_complex *R = (liquid_float_complex *) malloc (
@@ -711,6 +716,7 @@ void qdetector_cccf_buffered_execute_seek(qdetector_cccf _q,
   float rxy_peak = 0.0;
   unsigned int rxy_index = 0;
   unsigned int cm = 0;
+  unsigned int R_index = 0;
   for (unsigned int i = _pe; i < searchEnd; i++)
   {
     dotprod_cccf_execute (_q->dp, _x + i, R + cm);
@@ -719,42 +725,50 @@ void qdetector_cccf_buffered_execute_seek(qdetector_cccf _q,
     {
       rxy_peak = Rsq;
       rxy_index = i;
+      R_index = cm;
     }
     cm++;
   }
 
-  float totalPower = liquid_sumsqcf (R + rxy_index, _q->s_len) / _q->s_len;
-
-#if DEBUG_QDETECTOR_PRINT
-  printf ("max = %10.8f at %d totalPower = %10.6f ratio = %10.8f\n", rxy_peak,
-    rxy_index, totalPower, rxy_peak / totalPower);
-#endif
-
-  // The correlation peak is at least 25 times the total power for SNRs >= 0dB.
-  // So, if max is not more than 20 times the total power, we don't have a peak.
-  // TODO is there not an analytic way to determine the threshold?
-
-  // TODO SNR >= 0 dB required for good dPhi estimate
-
-  if (totalPower * 20.0 < rxy_peak)
-  {
-#if DEBUG_QDETECTOR_PRINT
-    printf ("*** PN sequence detected;");
-#endif
-    // update state and save the start of the PN sequence in _x
-    _q->state = QDETECTOR_STATE_ALIGN;
-    _q->offset = rxy_index;
-  }
+  float totalPower = 0.0;
+  if (searchLen - R_index >= _q->s_len)
+    totalPower = liquid_sumsqcf (R + R_index, _q->s_len) / _q->s_len;
   else
+    totalPower = liquid_sumsqcf (R + R_index, searchLen - R_index) / (searchLen - R_index);
+
+  if (totalPower > _q->min_sample_mag)
   {
+
 #if DEBUG_QDETECTOR_PRINT
-    printf ("PN sequence not detected;");
-#endif
-  }
-#if DEBUG_QDETECTOR_PRINT
-  printf (" rxy = %12.8f, PN start = %u\n", rxy_peak, rxy_index);
+    printf ("max = %10.8f at %d totalPower = %10.6f ratio = %10.8f\n", rxy_peak,
+      rxy_index, totalPower, rxy_peak / totalPower);
 #endif
 
+    // The correlation peak is at least 25 times the total power for SNRs >= 0dB.
+    // So, if max is not more than 20 times the total power, we don't have a peak.
+    // TODO is there not an analytic way to determine the threshold?
+
+    // TODO SNR >= 0 dB required for good dPhi estimate
+
+    if (totalPower * 20.0 < rxy_peak)
+    {
+#if DEBUG_QDETECTOR_PRINT
+      printf ("*** PN sequence detected;");
+#endif
+      // update state and save the start of the PN sequence in _x
+      _q->state = QDETECTOR_STATE_ALIGN;
+      _q->offset = rxy_index;
+    }
+    else
+    {
+#if DEBUG_QDETECTOR_PRINT
+      printf ("PN sequence not detected;");
+#endif
+    }
+#if DEBUG_QDETECTOR_PRINT
+    printf (" rxy = %12.8f, PN start = %u\n", rxy_peak, rxy_index);
+#endif
+  }
   free (R);
 }
 

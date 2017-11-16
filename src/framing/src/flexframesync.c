@@ -889,7 +889,6 @@ flexframesync_buffered_execute (
   // If, after the method completes, the state is not what is expected,
   // reset and exit. Since the callback will not have been invoked, the packet
   // is effectively dropped.
-
   if (_q->state == FLEXFRAMESYNC_STATE_DETECTFRAME)
   {
 #if DEBUG_FLEXFRAMESYNC_PROFILE
@@ -905,15 +904,16 @@ flexframesync_buffered_execute (
     s = e;
 #endif
 
-    flexframesync_buffered_correction (_q, _x, _n);
-#if DEBUG_FLEXFRAMESYNC_PROFILE
-    clock_gettime (CLOCK_REALTIME, &endTS);
-    e = endTS.tv_sec * 1.0 + endTS.tv_nsec / 1000000000.0;
-    printf ("flexframesync_buffered_correction duration = %12.9f s\n", e - s);
-    s = e;
-#endif
     if (_q->state == FLEXFRAMESYNC_STATE_RXPREAMBLE)
     {
+      flexframesync_buffered_correction (_q, _x, _n);
+  #if DEBUG_FLEXFRAMESYNC_PROFILE
+      clock_gettime (CLOCK_REALTIME, &endTS);
+      e = endTS.tv_sec * 1.0 + endTS.tv_nsec / 1000000000.0;
+      printf ("flexframesync_buffered_correction duration = %12.9f s\n", e - s);
+      s = e;
+  #endif
+
       flexframesync_buffered_execute_rxpreamble (_q, _x);
 #if DEBUG_FLEXFRAMESYNC_PROFILE
       clock_gettime (CLOCK_REALTIME, &endTS);
@@ -966,7 +966,6 @@ flexframesync_buffered_execute_seekpn (
   unsigned int _pe,
   unsigned int _pl)
 {
-
   qdetector_cccf_reset(_q->detector);
  _q->pn_offset = qdetector_cccf_buffered_execute(_q->detector, _x, _n, _pe, _pl);
 
@@ -1064,6 +1063,7 @@ flexframesync_buffered_correction(
   sampleCount = 0;
   for (unsigned int i = 0; i < remainLen; i++)
   {
+//    printf("_q->pfb_index = %d\n",_q->pfb_index);
     // push sample into filterbank
     firpfb_crcf_push (_q->mf, corrected[i]);
     firpfb_crcf_execute (_q->mf, _q->pfb_index, &v);
