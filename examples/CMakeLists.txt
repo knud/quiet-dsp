@@ -4,6 +4,7 @@ LIQUID_BUILD_SAMPLES(
     SAMPLES
     agc_crcf_example
     agc_crcf_qpsk_example
+    agc_crcf_squelch_example
     agc_rrrf_example
     ampmodem_example
     asgramcf_example

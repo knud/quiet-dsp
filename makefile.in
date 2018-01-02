@@ -1351,6 +1351,7 @@ clean-bench:
 example_programs :=						\
 	examples/agc_crcf_example				\
 	examples/agc_crcf_qpsk_example				\
+	examples/agc_crcf_squelch_example			\
 	examples/agc_rrrf_example				\
 	examples/ampmodem_example				\
 	examples/asgramcf_example				\
