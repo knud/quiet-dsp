@@ -3814,6 +3814,9 @@ int flexframegen_set_header_props(flexframegen          _q,
 // get length of assembled frame (samples)
 unsigned int flexframegen_getframelen(flexframegen _q);
 
+// get length of assembled header (samples)
+unsigned int flexframegen_getheaderlen(flexframegen _q);
+
 // assemble a frame from an array of data
 //  _q              :   frame generator object
 //  _header         :   frame header

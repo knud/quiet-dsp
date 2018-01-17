@@ -354,6 +354,19 @@ unsigned int flexframegen_getframelen(flexframegen _q)
     return num_frame_symbols*_q->k; // k samples/symbol
 }
 
+// get header length (number of samples)
+unsigned int flexframegen_getheaderlen(flexframegen _q)
+{
+    if (!_q->frame_assembled) {
+        fprintf(stderr,"warning: flexframegen_getframelen(), frame not assembled!\n");
+        return 0;
+    }
+    unsigned int num_header_symbols =
+            _q->header_sym_len;    // header symbols
+
+    return num_header_symbols*_q->k; // k samples/symbol
+}
+
 // exectue frame generator (create the frame)
 //  _q              :   frame generator object
 //  _header         :   user-defined header
