@@ -36,7 +36,7 @@
 #include "liquid.internal.h"
 
 #define DEBUG_FLEXFRAMESYNC         0
-#define DEBUG_FLEXFRAMESYNC_PRINT   1
+#define DEBUG_FLEXFRAMESYNC_PRINT   0
 #define DEBUG_FLEXFRAMESYNC_PROFILE 0
 #define DEBUG_FILENAME              "flexframesync_internal_debug.m"
 #define DEBUG_BUFFER_LEN            (2000)
@@ -433,17 +433,14 @@ void flexframesync_execute(flexframesync   _q,
         switch (_q->state) {
         case FLEXFRAMESYNC_STATE_DETECTFRAME:
             // detect frame (look for p/n sequence)
-//          printf("i = %d\n",i);
             flexframesync_execute_seekpn(_q, _x[i]);
             break;
         case FLEXFRAMESYNC_STATE_RXPREAMBLE:
             // receive p/n sequence symbols
-//          printf("at i = %d single sample preamble counter = %d\n",i,_q->preamble_counter);
             flexframesync_execute_rxpreamble(_q, _x[i]);
             break;
         case FLEXFRAMESYNC_STATE_RXHEADER:
             // receive header symbols
-//          printf("at i = %d single sample preamble counter = %d\n",i,_q->preamble_counter);
             flexframesync_execute_rxheader(_q, _x[i]);
             break;
         case FLEXFRAMESYNC_STATE_RXPAYLOAD:
@@ -569,7 +566,6 @@ int flexframesync_step(flexframesync   _q,
 void flexframesync_execute_rxpreamble(flexframesync _q,
                                       liquid_float_complex _x)
 {
-//  printf("rxpreamble x %10.8f %10.8fj\n",creal(_x),cimag(_x));
     // step synchronizer
     liquid_float_complex mf_out = 0.0f;
     int sample_available = flexframesync_step(_q, _x, &mf_out);
@@ -587,7 +583,6 @@ void flexframesync_execute_rxpreamble(flexframesync _q,
             unsigned int index = _q->preamble_counter-delay;
 
             _q->preamble_rx[index] = mf_out;
-//            printf("rxpreamble[%d] %10.8f %10.8fj\n",index,creal(mf_out),cimag(mf_out));
         
 #if FLEXFRAMESYNC_ENABLE_EQ
             // train equalizer
@@ -691,7 +686,6 @@ void flexframesync_decode_header(flexframesync _q)
     // set fine carrier frequency and phase
     float dphi_hat = qpilotsync_get_dphi(_q->header_pilotsync);
     float  phi_hat = qpilotsync_get_phi (_q->header_pilotsync);
-    //printf("residual offset: dphi=%12.8f, phi=%12.8f\n", dphi_hat, phi_hat);
     nco_crcf_set_frequency(_q->pll, dphi_hat);
     nco_crcf_set_phase    (_q->pll, phi_hat + dphi_hat * _q->header_sym_len);
 
@@ -1063,7 +1057,6 @@ flexframesync_buffered_correction(
   sampleCount = 0;
   for (unsigned int i = 0; i < remainLen; i++)
   {
-//    printf("_q->pfb_index = %d\n",_q->pfb_index);
     // push sample into filterbank
     firpfb_crcf_push (_q->mf, corrected[i]);
     firpfb_crcf_execute (_q->mf, _q->pfb_index, &v);
@@ -1122,7 +1115,6 @@ flexframesync_buffered_execute_rxpreamble (
 
     // save output in p/n symbols buffer
       _q->preamble_rx[index] = _x[_q->preamble_counter];
-//      printf("rxpreamble[%d] %10.8f %10.8fj\n",index,creal(_q->preamble_rx[index]),cimag(_q->preamble_rx[index]));
       index++;
 
 

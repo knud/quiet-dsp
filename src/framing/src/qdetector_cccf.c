@@ -33,7 +33,7 @@
 #include "liquid.internal.h"
 
 #define DEBUG_QDETECTOR              0
-#define DEBUG_QDETECTOR_PRINT        1
+#define DEBUG_QDETECTOR_PRINT        0
 #define DEBUG_QDETECTOR_FILENAME     "qdetector_cccf_debug.m"
 
 //TODO move this to a general configuration of some kind
@@ -460,8 +460,6 @@ void qdetector_cccf_execute_seek(qdetector_cccf _q,
     if (_q->counter < _q->nfft)
         return;
     
-    printf("x2_sum_1 = %10.6f over %d samples\n",_q->x2_sum_1,_q->counter);
-
     // reset counter (last half of time buffer)
     _q->counter = _q->nfft/2;
 
@@ -565,8 +563,6 @@ void qdetector_cccf_execute_align(qdetector_cccf _q,
 
     if (_q->counter < _q->nfft)
         return;
-
-    //printf("signal is aligned!\n");
 
     // estimate timing offset
     fft_execute(_q->fft);
@@ -684,7 +680,6 @@ void qdetector_cccf_execute_align(qdetector_cccf _q,
     _q->x2_sum_0 = liquid_sumsqcf(_q->buf_time_0, _q->nfft/2);
     _q->x2_sum_1 = 0;
     _q->counter = _q->nfft/2;
-printf("  offset = %d counter = %d\n",_q->offset,_q->counter);
 
 }
 
@@ -842,7 +837,6 @@ void qdetector_cccf_buffered_execute_align(qdetector_cccf _q,
   // cross-multiply frequency-domain components, aligning appropriately with
   // estimated FFT offset index due to carrier frequency offset in received signal
   int freq_offset = qdetector_cccf_carrier_offset_index(_q, _q->dphi_hat);
-  printf("frequency offset = %d\n",freq_offset);
 
   memset(_q->buf_time_0, 0x00, _q->nfft*sizeof(liquid_float_complex));
   memmove(_q->buf_time_0, _x +  _q->offset, _q->nfft*sizeof(liquid_float_complex));
@@ -868,7 +862,9 @@ void qdetector_cccf_buffered_execute_align(qdetector_cccf _q,
   a     =  0.5f*(ypos + yneg) - y0;
   b     =  0.5f*(ypos - yneg);
   float c     =  y0;
+#if DEBUG_QDETECTOR_PRINT
   printf("a = %10.4f b = %10.4f c = %10.4f \n",a,b,c);
+#endif
   _q->tau_hat = -b / (2.0f*a); //-0.5f*(ypos - yneg) / (ypos + yneg - 2*y0);
   float g_hat   = (a*_q->tau_hat*_q->tau_hat + b*_q->tau_hat + c);
   _q->gamma_hat = g_hat * g_hat / ((float)(_q->nfft) * _q->s2_sum); // g_hat^2 because of sqrt for yneg/y0/ypos
