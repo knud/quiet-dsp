@@ -1090,6 +1090,7 @@ flexframesync_buffered_correction(
 #endif
 
   free(rotVector);
+  free(corrected);
   free(dphiVector);
 }
 
